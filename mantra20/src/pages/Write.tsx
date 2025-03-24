@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { Novel, Chapter } from '../types';
@@ -13,25 +13,10 @@ import { toast } from 'react-hot-toast';
 import { createChapter } from '../lib/api/chapters';
 import { Link } from 'react-router-dom';
 
-interface Chapter {
-  id: string;
-  novel_id: string;
-  title: string;
-  content: string;
-  chapter_number: number;
-  status: string;
-  created_at?: string;
-  updated_at?: string;
-}
-
-interface RouteParams {
-  novelId: string; // Make sure this matches the route parameter name
-}
-
 const Write: React.FC = () => {
   const { userProfile } = useAuth();
   const navigate = useNavigate();
-  const { novelId } = useParams();
+  const { novelId } = useParams<{ novelId?: string }>();
   const location = useLocation();
   const [myNovels, setMyNovels] = useState<Novel[]>([]);
   const [showNewNovelForm, setShowNewNovelForm] = useState(false);
@@ -51,24 +36,50 @@ const Write: React.FC = () => {
   const [newChapterTitle, setNewChapterTitle] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!userProfile) {
-      navigate('/auth');
-      return;
-    }
-
-    // If we're on /write route (no novelId), just fetch all novels
-    if (!novelId) {
-      fetchMyNovels();
-      return;
-    }
-
-    // If we have a novelId, fetch chapters for that novel
-    fetchChapters(novelId);
-  }, [novelId, userProfile]);
-
-  const fetchMyNovels = async () => {
+  const fetchChapters = useCallback(async (novelId: string) => {
     try {
+      setIsLoading(true);
+      const { data: chaptersData, error: chaptersError } = await supabase
+        .from('Chapters')
+        .select('*')
+        .eq('novel_id', novelId)
+        .order('chapter_number', { ascending: true });
+
+      if (chaptersError) throw chaptersError;
+
+      if (chaptersData) {
+        const typedChapters = chaptersData.map((chapter) => ({
+          chapter_id: String(chapter.chapter_id),
+          novel_id: String(chapter.novel_id),
+          title: String(chapter.title),
+          content: String(chapter.content),
+          chapter_number: Number(chapter.chapter_number),
+          status: String(chapter.status),
+          created_at: chapter.created_at ? String(chapter.created_at) : undefined,
+          updated_at: chapter.updated_at ? String(chapter.updated_at) : undefined,
+          views: Number(chapter.views || 0),
+        })) as Chapter[];
+
+        setChaptersMap((prev) => ({
+          ...prev,
+          [novelId]: typedChapters,
+        }));
+      }
+    } catch (error) {
+      console.error('Error fetching chapters:', error);
+      setError(
+        error instanceof Error ? error.message : 'Failed to fetch chapters'
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const fetchMyNovels = useCallback(async () => {
+    if (!userProfile?.user_id) return;
+
+    try {
+      setIsLoading(true);
       // Fetch novels
       const { data: novels, error: novelsError } = await supabase
         .from('Novels')
@@ -76,6 +87,8 @@ const Write: React.FC = () => {
         .eq('upload_by', userProfile.user_id);
 
       if (novelsError) throw novelsError;
+      if (!novels) throw new Error('No novels found');
+
       setMyNovels(novels);
 
       // Fetch chapters for each novel
@@ -91,23 +104,40 @@ const Write: React.FC = () => {
 
         if (chaptersError) throw chaptersError;
 
-        chapterData[novel.novel_id] = chaptersData;
-        chapterNumbers[novel.novel_id] =
-          chaptersData.length > 0
-            ? Math.max(...chaptersData.map((c) => c.chapter_number))
-            : 0;
+        if (chaptersData) {
+          const typedChapters = chaptersData.map((chapter) => ({
+            chapter_id: String(chapter.chapter_id),
+            novel_id: String(chapter.novel_id),
+            title: String(chapter.title),
+            content: String(chapter.content),
+            chapter_number: Number(chapter.chapter_number),
+            status: String(chapter.status),
+            created_at: chapter.created_at ? String(chapter.created_at) : undefined,
+            updated_at: chapter.updated_at ? String(chapter.updated_at) : undefined,
+            views: Number(chapter.views || 0),
+          })) as Chapter[];
+
+          chapterData[novel.novel_id] = typedChapters;
+          chapterNumbers[novel.novel_id] =
+            typedChapters.length > 0
+              ? Math.max(...typedChapters.map((c) => c.chapter_number))
+              : 0;
+        }
       }
 
       setChaptersMap(chapterData);
       setLastChapterNumbers(chapterNumbers);
     } catch (error) {
       console.error('Error fetching data:', error);
+      setError(
+        error instanceof Error ? error.message : 'Failed to fetch novels'
+      );
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [userProfile?.user_id]);
 
-  const handleDeleteNovel = async (novelId: string) => {
+  const handleDeleteNovel = useCallback(async (novelId: string) => {
     if (
       !confirm(
         'Are you sure you want to delete this novel? This action cannot be undone.'
@@ -137,9 +167,9 @@ const Write: React.FC = () => {
     } catch (error) {
       console.error('Error deleting novel:', error);
     }
-  };
+  }, []);
 
-  const handleDeleteChapter = async (novelId: string, chapterId: string) => {
+  const handleDeleteChapter = useCallback(async (novelId: string, chapterId: string) => {
     if (
       !confirm(
         'Are you sure you want to delete this chapter? This action cannot be undone.'
@@ -165,13 +195,13 @@ const Write: React.FC = () => {
     } catch (error) {
       console.error('Error deleting chapter:', error);
     }
-  };
+  }, []);
 
-  const handleChapterClick = (novelId: string, chapterId: string) => {
+  const handleChapterClick = useCallback((novelId: string, chapterId: string) => {
     navigate(`/novel/${novelId}/chapter/${chapterId}`);
-  };
+  }, [navigate]);
 
-  const handleAddChapter = async (e: React.FormEvent) => {
+  const handleAddChapter = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!novelId) {
@@ -187,11 +217,14 @@ const Write: React.FC = () => {
     try {
       setIsLoading(true);
 
+      const currentChapters = chaptersMap[novelId] || [];
+      const newChapterNumber = currentChapters.length + 1;
+
       const newChapter = {
         novel_id: novelId,
         title: newChapterTitle.trim(),
         content: '',
-        chapter_number: chaptersMap[novelId].length + 1,
+        chapter_number: newChapterNumber,
         status: 'draft',
       };
 
@@ -199,68 +232,34 @@ const Write: React.FC = () => {
 
       if (result.error) throw new Error(result.error);
 
-      // Get the newly created chapter data
-      const { data: newChapterData, error: fetchError } = await supabase
-        .from('Chapters')
-        .select('*')
-        .eq('novel_id', novelId)
-        .eq('title', newChapterTitle.trim())
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .single();
-
-      if (fetchError) throw fetchError;
-
-      // Add the new chapter to the state without refetching all chapters
-      setChaptersMap((prev) => ({
-        ...prev,
-        [novelId]: [...prev[novelId], newChapterData],
-      }));
-
-      // Reset form and close modal
-      setNewChapterTitle('');
-      toast.success('Chapter created successfully!');
-    } catch (error: any) {
-      console.error('Error creating chapter:', error);
-      toast.error(error.message || 'Failed to create chapter');
+      if (result.data) {
+        setChaptersMap((prev) => ({
+          ...prev,
+          [novelId]: [...(prev[novelId] || []), result.data as Chapter],
+        }));
+        setNewChapterTitle('');
+        toast.success('Chapter added successfully');
+      }
+    } catch (error) {
+      console.error('Error adding chapter:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to add chapter');
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [novelId, newChapterTitle, chaptersMap, userProfile?.user_id]);
 
-  const fetchChapters = async (novelId: string) => {
-    if (!novelId) {
-      navigate('/novels'); // Redirect to novels list if no ID
+  useEffect(() => {
+    if (!userProfile) {
+      navigate('/auth');
       return;
     }
 
-    try {
-      setIsLoading(true);
-
-      const { data, error: fetchError } = await supabase
-        .from('Chapters')
-        .select('*')
-        .eq('novel_id', novelId)
-        .order('chapter_number', { ascending: true });
-
-      if (fetchError) throw fetchError;
-
-      if (Array.isArray(data)) {
-        setChaptersMap((prev) => ({
-          ...prev,
-          [novelId]: data,
-        }));
-      }
-
-      setError(null);
-    } catch (error: any) {
-      console.error('Error fetching chapters:', error);
-      setError(error.message || 'Failed to load chapters');
-      toast.error('Failed to load chapters');
-    } finally {
-      setIsLoading(false);
+    if (!novelId) {
+      fetchMyNovels();
+    } else {
+      fetchChapters(novelId);
     }
-  };
+  }, [novelId, userProfile, navigate, fetchMyNovels, fetchChapters]);
 
   if (!userProfile) {
     return null;
